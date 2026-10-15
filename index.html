@@ -433,8 +433,8 @@ svg.leaflet-zoom-animated{will-change:transform}
       </div>
       <div class="export" id="export">
         <button type="button" class="btn small" id="copy-geo">Copy GeoJSON</button>
-        <button type="button" class="btn small" id="dl-geo" hidden>Download GeoJSON</button>
-        <button type="button" class="btn small" id="dl-gpx" hidden>Download GPX</button>
+        <button type="button" class="btn small" id="dl-geo">Download GeoJSON</button>
+        <button type="button" class="btn small" id="dl-gpx">Download GPX</button>
       </div>
       <p class="note" id="export-status" role="status"></p>
     </section>
@@ -1660,7 +1660,6 @@ svg.leaflet-zoom-animated{will-change:transform}
 (function () {
   'use strict';
 
-  const IS_ARTIFACT = false;
   const MP = window.MowPath;
   const L = window.L;
   const el = (id) => document.getElementById(id);
@@ -1800,7 +1799,6 @@ svg.leaflet-zoom-animated{will-change:transform}
   const ICONS = { vtx: icon('vtx'), ghost: icon('vtx ghost'), draft: icon('draft-v'), addr: icon('addr-pin'), mower: icon('mower') };
 
   function setBase(which) {
-    if (which === 'sat' && IS_ARTIFACT) return;
     S.base = which;
     if (which === 'sat') {
       if (map.hasLayer(sketch)) map.removeLayer(sketch);
@@ -2172,13 +2170,21 @@ svg.leaflet-zoom-animated{will-change:transform}
     } finally { clearTimeout(t); }
   }
 
+  // Nominatim's usage policy allows at most one request per second, and one search can
+  // try several query variants, so requests to it are spaced out across the session.
+  let nominatimNext = 0;
+  async function nominatimTurn() {
+    const now = Date.now(), at = Math.max(now, nominatimNext);
+    nominatimNext = at + 1100;
+    if (at > now) await new Promise((r) => setTimeout(r, at - now));
+  }
+
   async function geocode(q) {
     const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
     if (m) {
       const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
       if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng, label: lat.toFixed(5) + ', ' + lng.toFixed(5) };
     }
-    if (IS_ARTIFACT) throw new Error('blocked');
     // Progressively looser queries: exact address, then street without the house number, then ZIP.
     const variants = [{ q, approx: false }];
     const noNum = q.replace(/^\s*\d+[A-Za-z]?\s+/, '').trim();
@@ -2198,6 +2204,7 @@ svg.leaflet-zoom-animated{will-change:transform}
         return { lat: c.location.y, lng: c.location.x, label: c.address, hn: pointy ? String(a.AddNum || '') : '' };
       },
       async (qq) => {
+        await nominatimTurn();
         const r = await fetchJSON('https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&q=' + encodeURIComponent(qq));
         return r && r[0] ? { lat: parseFloat(r[0].lat), lng: parseFloat(r[0].lon), label: r[0].display_name, hn: (r[0].address && r[0].address.house_number) || '' } : null;
       },
@@ -2246,9 +2253,8 @@ svg.leaflet-zoom-animated{will-change:transform}
       goTo(loc);
     } catch (err) {
       const why = err && err.message;
-      if (why === 'blocked') setFind('Address search needs network access that this preview blocks. Enter coordinates such as 39.77, -86.15, or open the standalone file.', 'err');
-      else if (why === 'notfound') setFind('No match for that address. Try adding the city and state, or enter coordinates.', 'err');
-      else setFind('Could not reach the address service. If you opened this file directly from disk, serve the folder over http (python3 -m http.server) or enter coordinates.', 'err');
+      if (why === 'notfound') setFind('No match for that address. Try adding the city and state, or enter coordinates.', 'err');
+      else setFind('The address services are busy or unreachable right now. Try again in a moment, or enter coordinates such as 39.77, -86.15.', 'err');
     } finally { el('find-btn').disabled = false; }
   });
 
@@ -2256,8 +2262,8 @@ svg.leaflet-zoom-animated{will-change:transform}
     if (S.sample) leaveSample();
     gPin.clearLayers();
     L.marker([loc.lat, loc.lng], { icon: ICONS.addr, interactive: false, keyboard: false }).addTo(gPin);
-    if (!IS_ARTIFACT) setBase('sat');
-    map.setView([loc.lat, loc.lng], loc.approx === 'zip' ? 16 : loc.approx ? 18 : (IS_ARTIFACT ? 19 : 20));
+    setBase('sat');
+    map.setView([loc.lat, loc.lng], loc.approx === 'zip' ? 16 : loc.approx ? 18 : 20);
     const lbl = String(loc.label).split(',').slice(0, 3).join(',');
     if (loc.approx) setFind('Could not find that exact house, so this is the ' + (loc.approx === 'zip' ? 'ZIP code area' : 'street') + ' (' + lbl + '). Pan and zoom to your house, then outline the lawn.', 'ok');
     else setFind('Found ' + lbl + '. Now outline the lawn.', 'ok');
@@ -2667,20 +2673,13 @@ svg.leaflet-zoom-animated{will-change:transform}
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
   el('copy-geo').addEventListener('click', () => { if (S.plan) copyText(geojson()); });
-  if (!IS_ARTIFACT) {
-    el('dl-geo').hidden = false; el('dl-gpx').hidden = false;
-    el('dl-geo').addEventListener('click', () => { if (S.plan) download('mowing-route.geojson', 'application/geo+json', geojson()); });
-    el('dl-gpx').addEventListener('click', () => { if (S.plan) download('mowing-route.gpx', 'application/gpx+xml', gpx()); });
-  }
+  el('dl-geo').addEventListener('click', () => { if (S.plan) download('mowing-route.geojson', 'application/geo+json', geojson()); });
+  el('dl-gpx').addEventListener('click', () => { if (S.plan) download('mowing-route.gpx', 'application/gpx+xml', gpx()); });
 
   /* ---------- start up ---------- */
 
   el('base-sat').addEventListener('click', () => setBase('sat'));
   el('base-sketch').addEventListener('click', () => setBase('sketch'));
-  if (IS_ARTIFACT) {
-    el('base-sat').disabled = true;
-    el('base-sat').title = 'Satellite imagery loads in the standalone file';
-  }
 
   function startSample() {
     const P = (pts) => MP.fromLocal(SAMPLE_ORIGIN[0], SAMPLE_ORIGIN[1], pts);
@@ -2708,34 +2707,82 @@ svg.leaflet-zoom-animated{will-change:transform}
     runPlan();
   }
 
+  // Saved state comes from localStorage, which may hold a corrupt save or one from another
+  // version, so every field is checked before use.
+  const isNum = (v) => typeof v === 'number' && isFinite(v);
+  const isLL = (p) => Array.isArray(p) && p.length >= 2 && isNum(p[0]) && isNum(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180;
+  const isRing = (pts) => Array.isArray(pts) && pts.length >= 3 && pts.every(isLL);
+
   function savedLawns(saved) {
-    const list = saved.lawns || (saved.lawn ? [Object.assign({ name: 'Lawn 1' }, saved.lawn)] : []);
-    return list.filter((l) => l && l.pts && l.pts.length >= 3);
+    if (!saved || typeof saved !== 'object') return [];
+    // Saves from before multiple lawns hold a single `lawn`.
+    const list = Array.isArray(saved.lawns) ? saved.lawns : (saved.lawn ? [Object.assign({ name: 'Lawn 1' }, saved.lawn)] : []);
+    return list.filter((l) => l && isRing(l.pts));
+  }
+
+  function savedObstacles(saved) {
+    if (!Array.isArray(saved.obstacles)) return [];
+    return saved.obstacles.filter((o) => {
+      if (!o) return false;
+      if (o.kind === 'round') return isLL(o.center) && isNum(o.radius) && o.radius > 0;
+      return o.kind === 'poly' && isRing(o.pts);
+    });
   }
 
   function restore(saved) {
-    // Saves from before multiple lawns hold a single `lawn`.
-    S.lawns = savedLawns(saved);
-    S.obstacles = saved.obstacles || [];
-    S.start = saved.start || null;
-    Object.assign(S.settings, saved.settings || {});
-    idSeq = saved.idSeq || 1;
+    const lawns = savedLawns(saved), obstacles = savedObstacles(saved);
+    // Keep new ids clear of every saved one.
+    let seq = isNum(saved.idSeq) ? Math.max(1, Math.floor(saved.idSeq)) : 1;
+    lawns.concat(obstacles).forEach((sh) => {
+      const m = /^[lo](\d+)$/.exec(sh.id);
+      if (m) seq = Math.max(seq, +m[1] + 1);
+    });
+    const used = new Set();
+    const fix = (sh, kind, prefix, name, i) => {
+      sh.kind = kind;
+      if (typeof sh.id !== 'string' || used.has(sh.id)) sh.id = prefix + seq++;
+      used.add(sh.id);
+      if (typeof sh.name !== 'string' || !sh.name) sh.name = name + ' ' + (i + 1);
+      return sh;
+    };
+    S.lawns = lawns.map((l, i) => fix(l, 'lawn', 'l', 'Lawn', i));
+    S.obstacles = obstacles.map((o, i) => {
+      fix(o, o.kind, 'o', 'Obstacle', i);
+      if (o.kind === 'round') regen(o);
+      return o;
+    });
+    idSeq = seq;
+    S.start = isLL(saved.start) ? [saved.start[0], saved.start[1]] : null;
+    const set = saved.settings && typeof saved.settings === 'object' ? saved.settings : {};
+    Object.keys(S.settings).forEach((k) => {
+      if (typeof set[k] === typeof S.settings[k] && (typeof set[k] !== 'number' || isFinite(set[k]))) S.settings[k] = set[k];
+    });
     S.sample = false;
     drawShapes(); renderShapeList();
-    if (saved.view) map.setView(saved.view.c, saved.view.z);
-    else if (S.lawns.length) map.fitBounds(lawnBounds(), { padding: [60, 60] });
-    setBase(saved.base === 'sat' && !IS_ARTIFACT ? 'sat' : 'sketch');
+    const v = saved.view;
+    if (v && isLL(v.c) && isNum(v.z)) map.setView(v.c, v.z);
+    else map.fitBounds(lawnBounds(), { padding: [60, 60] });
+    setBase(saved.base === 'sat' ? 'sat' : 'sketch');
   }
 
   syncSettingsUI();
   map.invalidateSize();
   const saved = store.get(STORE_KEY);
-  if (saved && savedLawns(saved).length) {
-    restore(saved);
-    updateNext();
-  } else {
-    startSample();
+  let restored = false;
+  if (savedLawns(saved).length) {
+    try {
+      restore(saved);
+      syncSettingsUI();
+      updateNext();
+      restored = true;
+    } catch (e) {
+      // A save this version cannot read: start fresh rather than fail on every visit.
+      console.warn('Mowline: discarding unreadable saved state', e);
+      store.set(STORE_KEY, null);
+      S.lawns = []; S.obstacles = []; S.start = null; S.selected = null;
+    }
   }
+  if (!restored) startSample();
 
   // Handle for debugging and automated checks.
   window.__mowline = { S, map, runPlan, setTool, startSample, geocode, select };
